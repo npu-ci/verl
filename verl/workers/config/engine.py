@@ -283,7 +283,7 @@ class VeOmniEngineConfig(EngineConfig):
             6. `veomni_flash_attention_2_with_sp`
             7. `veomni_flash_attention_3_with_sp`
             8. `veomni_flash_attention_4_with_sp`
-            9. `native-sparse`  
+            9. `native-sparse`
             default "flash_attention_2"
             Note: In case VeOmni add more attn_implementation, please check https://github.com/ByteDance-Seed/VeOmni/
         moe_implementation (str): MoE implementation to use.
@@ -305,6 +305,7 @@ class VeOmniEngineConfig(EngineConfig):
         mixed_precision (Optional[dict[str, Any]]): Mixed precision configuration for FSDP, default None
 
     """
+
     _mutable_fields = EngineConfig._mutable_fields | {"attn_implementation"}
     wrap_policy: dict[str, Any] = field(default_factory=dict)
     offload_policy: bool = False
@@ -347,9 +348,11 @@ class VeOmniEngineConfig(EngineConfig):
                 warnings.warn(
                     f"Sequence Parallel is enabled (ulysses_parallel_size={self.ulysses_parallel_size}), "
                     f"automatically replacing attn_implementation from '{self.attn_implementation}' "
-                    f"to '{new_impl}'"
+                    f"to '{new_impl}'",
+                    stacklevel=2,
                 )
                 self.attn_implementation = new_impl
+
 
 @dataclass
 class TorchtitanEngineConfig(EngineConfig):

@@ -14,8 +14,7 @@
 
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional
 
 import torch
 import torch.distributed as dist
@@ -47,7 +46,6 @@ from ..fsdp.transformer_impl import FSDPEngine, FSDPEngineWithLMHead
 from ..utils import enable_full_determinism, postprocess_batch_func, prepare_micro_batches
 from .utils import (
     MOE_PARAM_HANDERS,
-    VL_TYPE2INDEX,
     load_veomni_model_to_gpu,
     load_veomni_optimizer,
     offload_veomni_model_to_cpu,
@@ -506,7 +504,8 @@ def sp_slice(feature: torch.Tensor, dim: int = -1) -> torch.Tensor:
     seq_length = feature.size(dim)
     sp_chunk_size = seq_length // sp_size
     return feature.narrow(dim, sp_rank * sp_chunk_size, sp_chunk_size)
-    
+
+
 def sp_padding(
     feature: torch.Tensor,
     dim: int = -1,
@@ -533,20 +532,28 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
     def prepare_model_inputs(self, micro_batch: TensorDict):
         """
         Process model inputs according to VeOmni SequenceParallelCollator.
-        
-        This method extends the parent class's prepare_model_inputs method, primarily used for input processing in sequence parallel training scenarios:
+
+        This method extends the parent class's prepare_model_inputs method, primarily used for input processing
+        in sequence parallel training scenarios:
         1. Precompute parameters required for flash attention
         2. Slice position_ids
         3. Slice input_ids for VLM models
         4. Pad and slice pixel_values
-        
+
         Args:
             micro_batch (TensorDict): Micro batch data containing model inputs
-            
+
         Returns:
             Tuple[Dict, Dict]: Processed model inputs and output arguments
         """
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
+
+        is_vlm_model = hasattr(getattr(self.module, "module", self.module).config, "vision_config")
+        if is_vlm_model:
+            image_mask = model_inputs["input_ids"] == self.module.config.image_token_id
+            video_mask = model_inputs["input_ids"] == self.module.config.video_token_id
+            model_inputs.update({"image_mask": image_mask, "video_mask": video_mask})
+
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
 
         if use_remove_padding and parallel_state.get_parallel_state().sp_enabled:
@@ -554,7 +561,9 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
             position_ids = model_inputs["position_ids"]
             if position_ids.dim() == 3:
                 position_ids = position_ids[0]
-            (cu_seq_lens_q, cu_seq_lens_k), (max_length_q, max_length_k) = prepare_fa_kwargs_from_position_ids(position_ids)
+            (cu_seq_lens_q, cu_seq_lens_k), (max_length_q, max_length_k) = prepare_fa_kwargs_from_position_ids(
+                position_ids
+            )
             model_inputs.update(
                 {
                     "cu_seq_lens_q": cu_seq_lens_q,
@@ -566,17 +575,13 @@ class VeOmniEngineWithLMHead(VeOmniEngine, FSDPEngineWithLMHead):
 
             # position_ids has been padded but not slice, so we need to slice it here
             model_inputs["position_ids"] = sp_slice(model_inputs["position_ids"], dim=-1)
-            is_vlm_model = hasattr(getattr(self.module, "module", self.module).config, "vision_config")
             if is_vlm_model:
                 # input_ids has been padded but not sliced
-                image_mask = model_inputs["input_ids"] == self.module.config.image_token_id
-                video_mask = model_inputs["input_ids"] == self.module.config.video_token_id
-                model_inputs.update({"image_mask": image_mask, "video_mask": video_mask})
                 model_inputs["input_ids"] = sp_slice(model_inputs["input_ids"], dim=-1)
 
             if "pixel_values" in model_inputs:
                 model_inputs["pixel_values"] = sp_padding(model_inputs["pixel_values"], dim=0, pad_scale=4)
                 model_inputs["pixel_values"] = sp_slice(model_inputs["pixel_values"], dim=0)
-            
+
             # TODO: support pad and slice pixel_value_videos
         return model_inputs, output_args
